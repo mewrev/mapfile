@@ -58,6 +58,12 @@ func ParseFile(mapPath string) (*Map, error) {
 
 // Parse parses the given symbol map file, reading from r.
 func Parse(r io.Reader) (*Map, error) {
+	// Read lines.
+	lines, err := readLines(r)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+
 	// Example contents of foo.MAP file:
 	//
 	//    FOO
@@ -88,23 +94,12 @@ func Parse(r io.Reader) (*Map, error) {
 	//    FIXUPS: 101506 21 13 21 15 21 39f 5f 114 211 10 17 9 4a 32 61 64 33 30
 	//    ...
 	m := &Map{}
-	s := bufio.NewScanner(r)
-	var (
-		hasName         bool
-		inSectList      bool
-		inSymList       bool
-		inStaticSymList bool
-	)
-loop:
-	for s.Scan() {
-		line := s.Text()
-		line = strings.TrimSpace(line)
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
 		switch {
 		// Name of linker output.
-		case !hasName:
-			m.Name = line
-			hasName = true // first line is linker output name.
-			continue
+		case i == 0:
+			m.Name = line // first line is linker output name.
 		// Link date.
 		case strings.HasPrefix(line, "Timestamp is "):
 			// Timestamp is 5e97f112 (Wed Apr 15 22:45:54 2020)
@@ -116,97 +111,98 @@ loop:
 			m.Date = date
 		// Base address.
 		case strings.HasPrefix(line, "Preferred load address is "):
+			// Preferred load address is 00400000
 			rawBaseAddr := line[len("Preferred load address is "):]
 			baseAddr, err := strconv.ParseUint(rawBaseAddr, 16, 64)
 			if err != nil {
 				return nil, errors.WithStack(err)
 			}
 			m.BaseAddr = baseAddr
-		// List of sections (start).
-		case strings.HasPrefix(line, "Start         Length     Name                   Class"):
-			inSectList = true
 		// List of sections.
-		case inSectList:
-			// Example:
-			//
-			//    0001:00000000 001012c6H .text                   CODE
-			sect, ok, err := parseSection(line)
+		case strings.HasPrefix(line, "Start         Length     Name                   Class"):
+			sects, n, err := parseSections(lines[i:])
 			if err != nil {
 				return nil, errors.WithStack(err)
 			}
-			if !ok {
-				inSectList = false
-				continue
-			}
-			m.Sects = append(m.Sects, sect)
-		// List of symbols (start).
-		case strings.HasPrefix(line, "Address         Publics by Value              Rva+Base   Lib:Object"):
-			inSymList = true
-			// Skip empty line between header and list of symbols.
-			if !s.Scan() {
-				break loop
-			}
-			if line := s.Text(); len(line) != 0 {
-				return nil, errors.Errorf("unexpected line between header and list of symbols; expected empty line, got %q", line)
-			}
+			m.Sects = append(m.Sects, sects...)
+			i += n-1
 		// List of symbols.
-		case inSymList:
-			// Example:
-			//
-			//    0001:00000000       ?bar@@YIXH@Z               00401000 f baz.obj
-			sym, ok, err := parseSymbol(line)
+		case strings.HasPrefix(line, "Address         Publics by Value              Rva+Base   Lib:Object"):
+			fallthrough
+		case strings.HasPrefix(line, "Static symbols"):
+			syms, n, err := parseSymbols(lines[i:])
 			if err != nil {
 				return nil, errors.WithStack(err)
 			}
-			if !ok {
-				inSymList = false
-				continue
-			}
-			m.Syms = append(m.Syms, sym)
+			m.Syms = append(m.Syms, syms...)
+			i += n-1
 		// Entry point.
 		case strings.HasPrefix(line, "entry point at"):
-			// Example:
-			//
-			//    entry point at        0001:000f0290
+			// entry point at        0001:000f0290
 			rawEntry := strings.TrimSpace(strings.TrimPrefix(line, "entry point at"))
 			entry, err := parseSegmentOffset(rawEntry)
 			if err != nil {
 				return nil, errors.WithStack(err)
 			}
 			m.Entry = entry
-		// List of static symbols (start).
-		case strings.HasPrefix(line, "Static symbols"):
-			inStaticSymList = true
-			// Skip empty line between header and list of symbols.
-			if !s.Scan() {
-				break loop
-			}
-			if line := s.Text(); len(line) != 0 {
-				return nil, errors.Errorf("unexpected line between header and list of static symbols; expected empty line, got %q", line)
-			}
-		// List of static symbols.
-		case inStaticSymList:
-			// Example:
-			//
-			//    0001:000dc1c2       ?quux@@YIXXZ        004dd1c2 f quuz.obj
-			sym, ok, err := parseSymbol(line)
-			if err != nil {
-				return nil, errors.WithStack(err)
-			}
-			if !ok {
-				inStaticSymList = false
-				continue
-			}
-			sym.IsStatic = true
-			m.Syms = append(m.Syms, sym)
 		case strings.HasPrefix(line, "FIXUPS:"):
 			// ignore.
 		}
 	}
-	if err := s.Err(); err != nil {
-		return nil, errors.WithStack(err)
-	}
 	return m, nil
+}
+
+// parseSections parses a list of sections from the given lines, terminated by a
+// blank line.
+func parseSections(lines []string) (sects []*Section, n int, err error) {
+	// Skip header.
+	n++
+	// Parse list of sections.
+	for ; n < len(lines); n++ {
+		line := lines[n]
+		if len(line) == 0 {
+			// End of sections list reached.
+			break
+		}
+		// 0001:00000000 001012c6H .text                   CODE
+		sect, err := parseSection(line)
+		if err != nil {
+			return nil, n, errors.WithStack(err)
+		}
+		sects = append(sects, sect)
+	}
+	return sects, n, nil
+}
+
+// parseSymbols parses a list of symbols from the given lines, terminated by a
+// blank line.
+func parseSymbols(lines []string) (syms []*Symbol, n int, err error) {
+	// Parse header.
+	header := lines[n]
+	isStatic := strings.HasPrefix(header, "Static symbols")
+	n++
+	// Parse empty line between header and list of symbols.
+	emptyLine := lines[n]
+	if len(emptyLine) != 0 {
+		return nil, n, errors.Errorf("unexpected line between header and list of symbols; expected empty line, got %q", emptyLine)
+	}
+	n++
+	// Parse list of symbols.
+	for ; n < len(lines); n++ {
+		line := lines[n]
+		if len(line) == 0 {
+			// End of symbols list reached.
+			break
+		}
+		// 0001:00000000       ?bar@@YIXH@Z               00401000 f baz.obj
+		sym, err := parseSymbol(line)
+		if err != nil {
+			return nil, n, errors.WithStack(err)
+		}
+		sym.IsStatic = isStatic
+		syms = append(syms, sym)
+	}
+	return syms, n, nil
 }
 
 // Section tracks section linkage information.
@@ -225,15 +221,11 @@ type Section struct {
 }
 
 // parseSection parses the string representation of the given section.
-func parseSection(s string) (*Section, bool, error) {
+func parseSection(s string) (*Section, error) {
 	// Example:
 	//
 	//    0001:00000000 001012c6H .text                   CODE
 	fields := strings.Fields(s)
-	if len(fields) == 0 {
-		// End of section list reached.
-		return nil, false, nil
-	}
 	sect := &Section{}
 	// Start of section (offset relative to segment).
 	//
@@ -241,7 +233,7 @@ func parseSection(s string) (*Section, bool, error) {
 	rawStart := fields[0]
 	start, err := parseSegmentOffset(rawStart)
 	if err != nil {
-		return nil, false, errors.WithStack(err)
+		return nil, errors.WithStack(err)
 	}
 	sect.Start = start
 	// Size in bytes.
@@ -250,7 +242,7 @@ func parseSection(s string) (*Section, bool, error) {
 	rawSize := strings.TrimSuffix(fields[1], "H")
 	size, err := strconv.ParseUint(rawSize, 16, 64)
 	if err != nil {
-		return nil, false, errors.WithStack(err)
+		return nil, errors.WithStack(err)
 	}
 	sect.Size = int(size)
 	// Section name.
@@ -261,7 +253,7 @@ func parseSection(s string) (*Section, bool, error) {
 	//
 	//    CODE
 	sect.Type = SectionTypeFromString(fields[3])
-	return sect, true, nil
+	return sect, nil
 }
 
 //go:generate stringer -linecomment -type SectionType
@@ -298,23 +290,19 @@ type Symbol struct {
 }
 
 // parseSymbol parses the string representation of the given symbol.
-func parseSymbol(s string) (*Symbol, bool, error) {
+func parseSymbol(s string) (*Symbol, error) {
 	// Example:
 	//
 	//    0001:00000000       ?bar@@YIXH@Z               00401000 f baz.obj
-	fields := strings.Fields(s)
-	if len(fields) == 0 {
-		// End of symbols list reached.
-		return nil, false, nil
-	}
 	sym := &Symbol{}
+	fields := strings.Fields(s)
 	// Start of symbol (offset relative to segment).
 	//
 	//    0001:00000000
 	rawStart := fields[0]
 	start, err := parseSegmentOffset(rawStart)
 	if err != nil {
-		return nil, false, errors.WithStack(err)
+		return nil, errors.WithStack(err)
 	}
 	sym.Start = start
 	// Symbol name.
@@ -328,7 +316,7 @@ func parseSymbol(s string) (*Symbol, bool, error) {
 	rawAddr := fields[2]
 	addr, err := strconv.ParseUint(rawAddr, 16, 64)
 	if err != nil {
-		return nil, false, errors.WithStack(err)
+		return nil, errors.WithStack(err)
 	}
 	sym.Addr = addr
 	// (optional) Symbol type.
@@ -347,7 +335,7 @@ func parseSymbol(s string) (*Symbol, bool, error) {
 	//
 	//    baz.obj
 	sym.ObjectName = fields[len(fields)-1]
-	return sym, true, nil
+	return sym, nil
 }
 
 // SegmentOffset specifies a segment relative offset.
@@ -381,4 +369,19 @@ func parseSegmentOffset(s string) (SegmentOffset, error) {
 	}
 	segOffset.Offset = offset
 	return segOffset, nil
+}
+
+// readLines reads and returns the lines of r, trimming spaces of each line.
+func readLines(r io.Reader) ([]string, error) {
+	s := bufio.NewScanner(r)
+	var lines []string
+	for s.Scan() {
+		line := s.Text()
+		line = strings.TrimSpace(line)
+		lines = append(lines, line)
+	}
+	if err := s.Err(); err != nil {
+		return nil, errors.WithStack(err)
+	}
+	return lines, nil
 }
