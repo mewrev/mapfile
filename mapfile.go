@@ -206,9 +206,6 @@ func parseSymbols(lines []string) (syms []*Symbol, n int, err error) {
 }
 
 // Section tracks section linkage information.
-//
-// Example:
-//    0001:00000000 001012c6H .text                   CODE
 type Section struct {
 	// Section name.
 	Name string
@@ -269,9 +266,6 @@ const (
 )
 
 // Symbol is a symbol with linker information.
-//
-// Example:
-//    0001:00000000       ?bar@@YIXH@Z               00401000 f baz.obj
 type Symbol struct {
 	// Demangled name of symbol.
 	Name string
@@ -339,9 +333,6 @@ func parseSymbol(s string) (*Symbol, error) {
 }
 
 // SegmentOffset specifies a segment relative offset.
-//
-// Example:
-//    0001:00093247
 type SegmentOffset struct {
 	// Segment number.
 	SegNum int
@@ -352,6 +343,9 @@ type SegmentOffset struct {
 // parseSegmentOffset parses the string representation of the given segment
 // offset.
 func parseSegmentOffset(s string) (SegmentOffset, error) {
+	// Example:
+	//
+	//    0001:00093247
 	var segOffset SegmentOffset
 	// Segment number.
 	parts := strings.Split(s, ":")
