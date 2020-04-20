@@ -2,9 +2,9 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 
-	"github.com/kr/pretty"
 	"github.com/mewrev/mapfile"
 )
 
@@ -15,6 +15,14 @@ func main() {
 		if err != nil {
 			log.Fatalf("%+v", err)
 		}
-		pretty.Println(m)
+		dumpIdaScript(m)
+	}
+}
+
+// dumpIdaScript converts the given symbol map file to a Python script for
+// loading the symbols into IDA.
+func dumpIdaScript(m *mapfile.Map) {
+	for _, sym := range m.Syms {
+		fmt.Printf("set_name(0x%08X, \"%s\", SN_NOWARN)\n", sym.Addr, sym.MangledName)
 	}
 }
