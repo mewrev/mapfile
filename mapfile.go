@@ -8,11 +8,23 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/mewkiz/pkg/term"
 	"github.com/pkg/errors"
+)
+
+var (
+	// dbg is a logger with the "pdb:" prefix which logs debug messages to standard
+	// error.
+	dbg = log.New(os.Stderr, term.CyanBold("pdb:")+" ", 0)
+	// warn is a logger with the "pdb:" prefix which logs warning messages to
+	// standard error.
+	warn = log.New(os.Stderr, term.RedBold("pdb:")+" ", 0)
 )
 
 // Note: this package supports the MAP file format produced by Visual Studio
@@ -119,15 +131,17 @@ func Parse(r io.Reader) (*Map, error) {
 			}
 			m.BaseAddr = baseAddr
 		// List of sections.
-		case strings.HasPrefix(line, "Start         Length     Name                   Class"):
+		// Start         Length     Name                   Class
+		case hasFields(line, []string{"Start", "Length", "Name", "Class"}):
 			sects, n, err := parseSections(lines[i:])
 			if err != nil {
 				return nil, errors.WithStack(err)
 			}
 			m.Sects = append(m.Sects, sects...)
-			i += n-1
+			i += n - 1
 		// List of symbols.
-		case strings.HasPrefix(line, "Address         Publics by Value              Rva+Base   Lib:Object"):
+		// Address         Publics by Value              Rva+Base   Lib:Object
+		case hasFields(line, []string{"Address", "Publics", "by", "Value", "Rva+Base", "Lib:Object"}):
 			fallthrough
 		case strings.HasPrefix(line, "Static symbols"):
 			syms, n, err := parseSymbols(lines[i:])
@@ -135,7 +149,7 @@ func Parse(r io.Reader) (*Map, error) {
 				return nil, errors.WithStack(err)
 			}
 			m.Syms = append(m.Syms, syms...)
-			i += n-1
+			i += n - 1
 		// Entry point.
 		case strings.HasPrefix(line, "entry point at"):
 			// entry point at        0001:000f0290
@@ -147,9 +161,29 @@ func Parse(r io.Reader) (*Map, error) {
 			m.Entry = entry
 		case strings.HasPrefix(line, "FIXUPS:"):
 			// ignore.
+		case len(line) == 0:
+			// skip empty lines.
+		default:
+			warn.Printf("support for line prefix %q not yet implemented", line)
 		}
 	}
 	return m, nil
+}
+
+// hasFields reports whether the given line contains the specified fields, as
+// separated by whitespace.
+func hasFields(line string, fields []string) bool {
+	got := strings.Fields(line)
+	if len(fields) != len(got) {
+		return false
+	}
+	for i := range fields {
+		want := fields[i]
+		if want != got[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // parseSections parses a list of sections from the given lines, terminated by a
